@@ -97,7 +97,7 @@ def get_data_loaders(args, tokenizer):
     datasets = {"train": defaultdict(list), "valid": defaultdict(list), "test": defaultdict(list)}
     for dataset_name, dataset in input_dataset.items():
         num_candidates = len(dataset[0]["turns"][0]["candidates"])
-        if args.num_candidates > 0 and dataset_name == 'train':
+        if args.num_candidates > 0:
             num_candidates = min(args.num_candidates, num_candidates)
         for dialog in dataset:
             for utterance in dialog["turns"]:
@@ -137,7 +137,7 @@ def train():
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
     parser.add_argument("--model_checkpoint", type=str, default="openai-gpt", help="Path, url or short name of the model")
-    parser.add_argument("--num_candidates", type=int, default=2, help="Number of candidates for training")
+    parser.add_argument("--num_candidates", type=int, default=2, help="Number of candidates for training and validation")
     parser.add_argument("--max_history", type=int, default=2, help="Number of previous exchanges to keep in history")
     parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size for training")
     parser.add_argument("--valid_batch_size", type=int, default=4, help="Batch size for validation")
@@ -217,7 +217,7 @@ def train():
         with torch.no_grad():
             batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
             input_ids, mc_token_ids, lm_labels, mc_labels, token_type_ids = batch
-            logger.info(tokenizer.decode(input_ids[0, -1, :].tolist()))
+            # logger.info(tokenizer.decode(input_ids[0, -1, :].tolist()))
             # if we dont send labels to model, it doesnt return losses
             lm_logits, mc_logits, *_ = model(
                 input_ids, token_type_ids=token_type_ids, mc_token_ids=mc_token_ids,
