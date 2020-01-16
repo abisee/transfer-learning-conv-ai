@@ -18,6 +18,7 @@ from ignite.contrib.handlers import ProgressBar, PiecewiseLinear
 from ignite.contrib.handlers.tensorboard_logger import TensorboardLogger, OutputHandler, OptimizerParamsHandler
 from transformers import (AdamW, OpenAIGPTDoubleHeadsModel, OpenAIGPTTokenizer,
                                   GPT2DoubleHeadsModel, GPT2Tokenizer, WEIGHTS_NAME, CONFIG_NAME)
+from torch.optim import SGD
 
 from utils import get_dataset, make_logdir
 
@@ -143,6 +144,7 @@ def train():
     parser.add_argument("--valid_batch_size", type=int, default=4, help="Batch size for validation")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Accumulate gradients on several steps")
     parser.add_argument("--lr", type=float, default=6.25e-5, help="Learning rate")
+    parser.add_argument("--learning_alg", type=str, default="adamw", help="Learning alg")
     parser.add_argument("--lm_coef", type=float, default=1.0, help="LM loss coefficient")
     parser.add_argument("--mc_coef", type=float, default=1.0, help="Multiple-choice loss coefficient")
     parser.add_argument("--max_norm", type=float, default=1.0, help="Clipping gradient norm")
@@ -176,9 +178,15 @@ def train():
     model.to(args.device)
     # Add special tokens if they are not already added
     add_special_tokens_(model, tokenizer)
-    optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=True)
+    if args.learning_alg == 'adamw':
+        optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=True)
+    elif args.learning_alg == 'sgd':
+        optimizer = SGD(model.parameters(), lr=args.lr)
+    else:
+        raise Exception('Unexpected learning_alg={}'.format(learning_alg))
 
     # Prepare model for FP16 and distributed training if needed (order is important, distributed should be the last)
+    # https://nvidia.github.io/apex/amp.html#opt-levels
     if args.fp16:
         from apex import amp  # Apex is only required if we use fp16 training
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16)
@@ -190,6 +198,7 @@ def train():
 
     # Training function and trainer
     def update(engine, batch):
+        """Perform one training iteration and return the loss"""
         model.train()
         batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
         input_ids, mc_token_ids, lm_labels, mc_labels, token_type_ids = batch
@@ -213,6 +222,7 @@ def train():
 
     # Evaluation function and evaluator (evaluator output is the input of the metrics)
     def inference(engine, batch):
+        """Measure the validation loss on the given batch"""
         model.eval()
         with torch.no_grad():
             batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
@@ -239,7 +249,7 @@ def train():
         trainer.add_event_handler(Events.EPOCH_STARTED, lambda engine: train_sampler.set_epoch(engine.state.epoch))
         evaluator.add_event_handler(Events.EPOCH_STARTED, lambda engine: valid_sampler.set_epoch(engine.state.epoch))
 
-    # Linearly decrease the learning rate from lr to zero
+    # Linearly decrease the learning rate from lr (at start) to zero (at n_epochs)
     scheduler = PiecewiseLinear(optimizer, "lr", [(0, args.lr), (args.n_epochs * len(train_loader), 0.0)])
     trainer.add_event_handler(Events.ITERATION_STARTED, scheduler)
 
@@ -250,6 +260,7 @@ def train():
     metrics.update({"average_nll": MetricsLambda(average_distributed_scalar, metrics["nll"], args),
                     "average_accuracy": MetricsLambda(average_distributed_scalar, metrics["accuracy"], args)})
     metrics["average_ppl"] = MetricsLambda(math.exp, metrics["average_nll"])
+    metrics["ppl"] = MetricsLambda(math.exp, metrics["nll"])
     for name, metric in metrics.items():
         metric.attach(evaluator, name)
 
@@ -266,8 +277,14 @@ def train():
         tb_logger.attach(trainer, log_handler=OptimizerParamsHandler(optimizer), event_name=Events.ITERATION_STARTED)
         tb_logger.attach(evaluator, log_handler=OutputHandler(tag="validation", metric_names=list(metrics.keys()), another_engine=trainer), event_name=Events.EPOCH_COMPLETED)
 
+        # checkpoint_handler is an ignite handler that saves up to 3 checkpoints
+        # every time an epoch completes, the checkpoint handler saves something called checkpoint_mymodel_xx.pth (up to 3 at any time)
         checkpoint_handler = ModelCheckpoint(log_dir, 'checkpoint', save_interval=1, n_saved=3)
         trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {'mymodel': getattr(model, 'module', model)})  # "getattr" takes care of distributed encapsulation
+
+        # Save the best checkpoint (highest negative ppl i.e. lowest ppl)
+        best_model_handler = ModelCheckpoint(log_dir, "best", n_saved=1, score_name="val_ppl", score_function=lambda engine: -engine.state.metrics['ppl'])
+        evaluator.add_event_handler(Events.COMPLETED, best_model_handler, {'mymodel': getattr(model, 'module', model)})
 
         torch.save(args, log_dir + '/model_training_args.bin')
         getattr(model, 'module', model).config.to_json_file(os.path.join(log_dir, CONFIG_NAME))
@@ -276,10 +293,11 @@ def train():
     # Run the training
     trainer.run(train_loader, max_epochs=args.n_epochs)
 
-    # On the main process: close tensorboard logger and rename the last checkpoint (for easy re-loading with OpenAIGPTModel.from_pretrained method)
-    if args.local_rank in [-1, 0] and args.n_epochs > 0:
-        os.rename(checkpoint_handler._saved[-1][1][-1], os.path.join(log_dir, WEIGHTS_NAME))  # TODO: PR in ignite to have better access to saved file paths (cleaner)
-        tb_logger.close()
+    # TODO: change this to rename the best checkpoint to pytorch_model.bin
+    # On the main process: close tensorboard logger and rename the last checkpoint to pytorch_model.bin (for easy re-loading with OpenAIGPTModel.from_pretrained method)
+    # if args.local_rank in [-1, 0] and args.n_epochs > 0:
+    #     os.rename(checkpoint_handler._saved[-1][1][-1], os.path.join(log_dir, WEIGHTS_NAME))  # TODO: PR in ignite to have better access to saved file paths (cleaner)
+    #     tb_logger.close()
 
 if __name__ == "__main__":
     train()

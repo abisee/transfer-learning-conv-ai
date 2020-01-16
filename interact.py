@@ -117,12 +117,14 @@ def run():
     torch.cuda.manual_seed(args.seed)
 
     logger.info("Get pretrained model and tokenizer")
-    tokenizer_class = GPT2Tokenizer if "gpt2" == args.model else OpenAIGPTTokenizer
+    tokenizer_class = GPT2Tokenizer if "gpt2" in args.model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
-    model_class = GPT2LMHeadModel if "gpt2" == args.model else OpenAIGPTLMHeadModel
+    model_class = GPT2LMHeadModel if "gpt2" in args.model else OpenAIGPTLMHeadModel
     model = model_class.from_pretrained(args.model_checkpoint)
     model.to(args.device)
     add_special_tokens_(model, tokenizer)
+
+    print('top_k: {}, top_p: {}, temperature: {}'.format(args.top_k, args.top_p, args.temperature))
 
     history = []
     while True:
