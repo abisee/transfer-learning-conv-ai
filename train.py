@@ -87,7 +87,7 @@ def build_input_from_segments(history, reply, tokenizer, lm_labels=False, with_e
     if lm_labels:
         instance["lm_labels"] = ([-1] * sum(len(s) for s in sequence[:-1])) + [-1] + sequence[-1][1:]  # -1 for the masked parts, then the actual targets for the reply
 
-    return instance, sequence  # TODO: second arg is never used, delete it
+    return instance
 
 
 def get_data_loaders(args, tokenizer):
@@ -105,7 +105,7 @@ def get_data_loaders(args, tokenizer):
                 history = utterance["history"][-(2*args.max_history+1):]
                 for j, candidate in enumerate(utterance["candidates"][-num_candidates:]):
                     lm_labels = bool(j == num_candidates-1)  # only get the lm target when we're using the last candidate (i.e. the gold candidate)
-                    instance, _ = build_input_from_segments(history, candidate, tokenizer, lm_labels)
+                    instance = build_input_from_segments(history, candidate, tokenizer, lm_labels)
                     for input_name, input_array in instance.items():
                         datasets[dataset_name][input_name].append(input_array)
                 datasets[dataset_name]["mc_labels"].append(num_candidates - 1)  # the index of the correct answer for the multiple choice
