@@ -19,7 +19,7 @@ from utils import get_dataset_personalities, download_pretrained_model
 def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k, top-p (nucleus) and/or threshold filtering
         Args:
-            logits: logits distribution shape (vocabulary size)
+            logits: logits distribution shape (batch_size, vocabulary size)
             top_k: <=0: no filtering, >0: keep only top k tokens with highest probability.
             top_p: <=0.0: no filtering, >0.0: keep only a subset S of candidates, where S is the smallest subset
                 whose total probability mass is greater than or equal to the threshold top_p.
@@ -27,7 +27,7 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
                 the threshold top_p.
             threshold: a minimal threshold to keep logits
     """
-    assert logits.dim() == 1  # Only work for batch size 1 for now - could update but it would obfuscate a bit the code
+    assert logits.dim() == 2
     top_k = min(top_k, logits.size(-1))
     if top_k > 0:
         # Remove all tokens with a probability less than the last token in the top-k tokens
@@ -45,8 +45,20 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
 
-        # Back to unsorted indices and set them to -infinity
-        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+        # sorted_indices_to_remove is shape (batch_size, vocab_size) containing bools corresponding to sorted_indices.
+        # Each row has Falses, then Trues.
+        # For each row, get the index (in sorted_indices_to_remove) of the last False
+        num_falses = sorted_indices_to_remove.size(1) - sorted_indices_to_remove.sum(dim=1)  # num false per row
+        last_false = num_falses - 1  # idx of last false per row. shape (batch_size)
+
+        # For each row, get the vocab-index of the last "False" token (i.e. least prob token that won't be masked)
+        least_prob_index = sorted_indices[range(sorted_indices.size(0)), last_false]  # shape (batch_size)
+
+        # For each row, get the logit for the least probable unmasked token
+        cutoff_logits = logits[range(sorted_indices.size(0)), least_prob_index]  # shape (batch_size)
+
+        # For each row, set everything lower than cutoff_logits to filter_value
+        indices_to_remove = logits < cutoff_logits.unsqueeze(1)
         logits[indices_to_remove] = filter_value
 
     indices_to_remove = logits < threshold
@@ -55,37 +67,64 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
     return logits
 
 
-def sample_sequence(history, tokenizer, model, args, current_output=None):
+def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_available() else "cpu",
+                    no_sample=False, max_length=20, min_length=1, temperature=0.7, top_k=0, top_p=0.9,
+                    num_samples=1, current_output=None):
     special_tokens_ids = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS)
     if current_output is None:
-        current_output = []
+        current_output = []  # now current_output is a list of ints
 
-    for i in range(args.max_length):
-        instance, _ = build_input_from_segments(history, current_output, tokenizer, with_eos=False)
+    # Initialize current_output for each sample
+    current_outputs = [[i for i in current_output] for _ in range(num_samples)]
 
-        input_ids = torch.tensor(instance["input_ids"], device=args.device).unsqueeze(0)
-        token_type_ids = torch.tensor(instance["token_type_ids"], device=args.device).unsqueeze(0)
+    # Record whether each sample is finished or not
+    finished = [False for _ in range(num_samples)]
+
+    for i in range(max_length):
+        print(f'step {i} of max {max_length}')
+        instances = [build_input_from_segments(history, current_output, tokenizer, with_eos=False) for current_output in current_outputs]
+
+        # input_ids and token_type_ids are both tensors shape (num_samples, seqlen)
+        input_ids = torch.tensor([instance["input_ids"] for instance in instances], device=device)
+        token_type_ids = torch.tensor([instance["token_type_ids"] for instance in instances], device=device)
 
         logits = model(input_ids, token_type_ids=token_type_ids)
         if isinstance(logits, tuple):  # for gpt2 and maybe others
             logits = logits[0]
-        logits = logits[0, -1, :] / args.temperature
-        logits = top_filtering(logits, top_k=args.top_k, top_p=args.top_p)
+
+        # now logits is shape (num_samples, seqlen, vocab_size)
+        logits = logits[:, -1, :].squeeze(1) / temperature  # take predictions for last timestep. shape (num_samples, vocab_size)
+        logits = top_filtering(logits, top_k=top_k, top_p=top_p)
         probs = F.softmax(logits, dim=-1)
+        prev = torch.topk(probs, 1)[1] if no_sample else torch.multinomial(probs, 1)
 
-        prev = torch.topk(probs, 1)[1] if args.no_sample else torch.multinomial(probs, 1)
-        if i < args.min_length and prev.item() in special_tokens_ids:
-            while prev.item() in special_tokens_ids:
-                if probs.max().item() == 1:
-                    warnings.warn("Warning: model generating special token with probability 1.")
-                    break  # avoid infinitely looping over special token
-                prev = torch.multinomial(probs, num_samples=1)
+        # If any sampled tokens (in prev) are in special_tokens_ids, but we haven't reached min_length yet, resample
+        for idx, p in enumerate(prev):
+            if i < min_length and p.item() in special_tokens_ids:
+                while p.item() in special_tokens_ids:
+                    if probs[idx].max().item() == 1:
+                        warnings.warn("Warning: model generating special token with probability 1.")
+                        break  # avoid infinitely looping over special token
+                    prev[idx] = torch.multinomial(probs[idx], num_samples=1)
 
-        if prev.item() in special_tokens_ids:
+        # Update which samples have finished
+        finished = [f or p.item() in special_tokens_ids for (f,p) in zip(finished, prev)]
+
+        # If they've all finished, quit
+        if all(finished):
             break
-        current_output.append(prev.item())
 
-    return current_output
+        # Otherwise append the latest tokens and continue
+        for current_output, p in zip(current_outputs, prev):
+            current_output.append(p.item())
+
+    # Within each sample, remove everything after the first special token
+    for sample_num, current_output in enumerate(current_outputs):
+        first_special_token_idx = next((idx for idx, val in enumerate(current_output) if val in special_tokens_ids), -1)  # will be -1 if there is no special token
+        if first_special_token_idx != -1:
+            current_outputs[sample_num] = current_output[:first_special_token_idx]
+
+    return current_outputs
 
 def run():
     parser = ArgumentParser()
@@ -134,7 +173,7 @@ def run():
             raw_text = input(">>> ")
         history.append(tokenizer.encode(raw_text))
         with torch.no_grad():
-            out_ids = sample_sequence(history, tokenizer, model, args)
+            out_ids = sample_sequence(history, tokenizer, model, args.min_length, args.max_length, args.device, args.temperature, args.top_p, args.top_k, args.no_sample)
         history.append(out_ids)
         history = history[-(2*args.max_history+1):]
         out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
