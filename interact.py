@@ -81,7 +81,7 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
     finished = [False for _ in range(num_samples)]
 
     for i in range(max_length):
-        print(f'step {i} of max {max_length}')
+        # print(f'step {i} of max {max_length}')
         instances = [build_input_from_segments(history, current_output, tokenizer, with_eos=False) for current_output in current_outputs]
 
         # input_ids and token_type_ids are both tensors shape (num_samples, seqlen)
