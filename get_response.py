@@ -107,14 +107,17 @@ def main(model, model_checkpoint, configs, max_history=2, device="cuda" if torch
             with torch.no_grad():
                 logger.info(f'Batch-sampling {num_samples} responses...')
                 # out_ids is a list length num_samples of lists of ints
-                out_ids = sample_sequence(history_tokenized, tokenizer, model, device=device, no_sample=config.no_sample,
-                                          max_length=config.max_length, min_length=config.min_length, temperature=config.temperature,
-                                          top_k=config.top_k, top_p=config.top_p, num_samples=num_samples, current_output=None)
+                finished_ids, unfinished_ids = sample_sequence(history_tokenized, tokenizer, model, device=device, no_sample=config.no_sample,
+                                                               max_length=config.max_length, min_length=config.min_length, temperature=config.temperature,
+                                                               top_k=config.top_k, top_p=config.top_p, num_samples=num_samples, current_output=None)
                 time_taken = time.time() - t0
-                logger.info(f'Sampling {num_samples} samples (longest sample {max([len(sample) for sample in out_ids])} tokens) took {time_taken} seconds')
-            responses = [tokenizer.decode(out, skip_special_tokens=True) for out in out_ids]
-            logger.info(f'Responses: {responses}')
-            row += [json.dumps(responses), time_taken]
+                logger.info(f'Sampling {num_samples} samples (longest sample {max([len(sample) for sample in finished_ids+unfinished_ids])} tokens) took {time_taken} seconds')
+            finished_responses = [tokenizer.decode(out, skip_special_tokens=True) for out in finished_ids]
+            unfinished_responses = [tokenizer.decode(out, skip_special_tokens=True) for out in unfinished_ids]
+            if unfinished_responses:
+                logger.info(f'Got some unfinished samples: {unfinished_responses}')
+            logger.info(f'Responses: {finished_responses}')
+            row += [json.dumps(finished_responses), time_taken]
 
         # Append to outfile
         with open(OUTFILE, 'a') as f:

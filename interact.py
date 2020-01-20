@@ -124,7 +124,11 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
         if first_special_token_idx != -1:
             current_outputs[sample_num] = current_output[:first_special_token_idx]
 
-    return current_outputs
+    # Separate out the unfinished ones
+    finished_outputs = [output for (output, is_finished) in zip(current_outputs, finished) if is_finished]
+    unfinished_outputs = [output for (output, is_finished) in zip(current_outputs, finished) if not is_finished]
+
+    return finished_outputs, unfinished_outputs
 
 def run():
     parser = ArgumentParser()
@@ -173,7 +177,7 @@ def run():
             raw_text = input(">>> ")
         history.append(tokenizer.encode(raw_text))
         with torch.no_grad():
-            out_ids = sample_sequence(history, tokenizer, model, args.min_length, args.max_length, args.device, args.temperature, args.top_p, args.top_k, args.no_sample)
+            out_ids, _ = sample_sequence(history, tokenizer, model, args.min_length, args.max_length, args.device, args.temperature, args.top_p, args.top_k, args.no_sample)
         history.append(out_ids)
         history = history[-(2*args.max_history+1):]
         out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
