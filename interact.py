@@ -8,13 +8,29 @@ from argparse import ArgumentParser
 from itertools import chain
 from pprint import pformat
 import warnings
+import time
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
 from transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
-from train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
-from utils import get_dataset_personalities, download_pretrained_model
+from .train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
+from .utils import get_dataset_personalities, download_pretrained_model
+
+
+@dataclass
+class DecodeConfig:
+    # Default is the recommended settings in transfer-learning-conv-ai
+    no_sample: bool = False
+    min_length: int = 1
+    max_length: int = 20
+    temperature: float = 0.7
+    top_k: int = 0
+    top_p: float = 0.9
+    max_history: int = 2
+    num_samples: int = 10
+
 
 def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k, top-p (nucleus) and/or threshold filtering
@@ -130,8 +146,8 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
 
     return finished_outputs, unfinished_outputs
 
-def load_model(model, model_checkpoint, device):
-    print("Get pretrained model and tokenizer")
+def load_model(model, model_checkpoint, device="cuda" if torch.cuda.is_available() else "cpu"):
+    print(f"Getting pretrained model and tokenizer (device={device})...")
     tokenizer_class = GPT2Tokenizer if "gpt2" in model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(model_checkpoint)
     model_class = GPT2LMHeadModel if "gpt2" in model else OpenAIGPTLMHeadModel
@@ -139,6 +155,43 @@ def load_model(model, model_checkpoint, device):
     model.to(device)
     add_special_tokens_(model, tokenizer)
     return model, tokenizer
+
+
+def batch_decode(model, tokenizer, history, config):
+    """
+    Generate num_samples responses to history.
+
+    @param model:
+    @param tokenizer:
+    @param history: list of strings (each one an utterance)
+    @param config:
+    @return: finished_responses: list (length <=config.num_samples) of strings, each a response to history.
+    """
+    # Get history_tokenized, which should be a list of list of ints. each list represents a turn.
+    history = history[-(2 * config.max_history + 1):]
+    print(f'Using this history: {history}')
+    history_tokenized = [tokenizer.encode(utterance) for utterance in history]
+
+    t0 = time.time()
+    with torch.no_grad():
+        print(f'Batch-sampling {config.num_samples} responses...')
+        # out_ids is a list length num_samples of lists of ints
+        finished_ids, unfinished_ids = sample_sequence(history_tokenized, tokenizer, model,
+                                                       no_sample=config.no_sample,
+                                                       max_length=config.max_length, min_length=config.min_length,
+                                                       temperature=config.temperature,
+                                                       top_k=config.top_k, top_p=config.top_p,
+                                                       num_samples=config.num_samples, current_output=None)
+        time_taken = time.time() - t0
+        longest_sample = max([len(sample) for sample in finished_ids + unfinished_ids])
+        print(f'Sampling {config.num_samples} samples (longest sample {longest_sample} tokens) took {time_taken} seconds')
+    finished_responses = [tokenizer.decode(out, skip_special_tokens=True) for out in finished_ids]
+    unfinished_responses = [tokenizer.decode(out, skip_special_tokens=True) for out in unfinished_ids]
+    if unfinished_responses:
+        print(f'Got some unfinished samples: {unfinished_responses}')
+    print(f'Responses: {finished_responses}')
+
+    return finished_responses
 
 
 def run():
