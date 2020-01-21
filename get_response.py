@@ -88,12 +88,7 @@ def main(model, model_checkpoint, configs, max_history=2, device="cuda" if torch
     for row in rows:
         print()
         freq, utterance = row[0], row[1]
-        utterance = 'my day was {}'.format(utterance)
-        history = [utterance]
-
-        # history should be odd length >=1 with the first utterance the user
-        assert len(history) >= 1
-        assert len(history) % 2 == 1
+        history = ["how's your day going so far?", utterance]
 
         # Get history_tokenized, which should be a list of list of ints. each list represents a turn.
         history = history[-(2 * max_history + 1):]
