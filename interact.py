@@ -130,6 +130,17 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
 
     return finished_outputs, unfinished_outputs
 
+def load_model(model, model_checkpoint, device):
+    print("Get pretrained model and tokenizer")
+    tokenizer_class = GPT2Tokenizer if "gpt2" in model else OpenAIGPTTokenizer
+    tokenizer = tokenizer_class.from_pretrained(model_checkpoint)
+    model_class = GPT2LMHeadModel if "gpt2" in model else OpenAIGPTLMHeadModel
+    model = model_class.from_pretrained(model_checkpoint)
+    model.to(device)
+    add_special_tokens_(model, tokenizer)
+    return model, tokenizer
+
+
 def run():
     parser = ArgumentParser()
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
@@ -159,13 +170,7 @@ def run():
     torch.random.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    logger.info("Get pretrained model and tokenizer")
-    tokenizer_class = GPT2Tokenizer if "gpt2" in args.model else OpenAIGPTTokenizer
-    tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
-    model_class = GPT2LMHeadModel if "gpt2" in args.model else OpenAIGPTLMHeadModel
-    model = model_class.from_pretrained(args.model_checkpoint)
-    model.to(args.device)
-    add_special_tokens_(model, tokenizer)
+    model, tokenizer = load_model(args.model, args.model_checkpoint, args.device)
 
     print('top_k: {}, top_p: {}, temperature: {}'.format(args.top_k, args.top_p, args.temperature))
 
