@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
+from pytorch_transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
 from .train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
 from .utils import get_dataset_personalities, download_pretrained_model
 
