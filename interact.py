@@ -146,7 +146,7 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
     return finished_outputs, unfinished_outputs
 
 def load_model(model, model_checkpoint, device="cuda" if torch.cuda.is_available() else "cpu"):
-    print("Getting pretrained model and tokenizer (device={device})...".format(device))
+    print("Getting pretrained model and tokenizer (device={})...".format(device))
     tokenizer_class = GPT2Tokenizer if "gpt2" in model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(model_checkpoint)
     model_class = GPT2LMHeadModel if "gpt2" in model else OpenAIGPTLMHeadModel
@@ -168,7 +168,7 @@ def batch_decode(model, tokenizer, history, config):
     """
     # Get history_tokenized, which should be a list of list of ints. each list represents a turn.
     history = history[-(2 * config['max_history'] + 1):]
-    print(f'Generating {config["num_samples"]} responses to this history: {history} with this config: {config}')
+    print('Generating {} responses to this history: {} with this config: {}'.format(config["num_samples"], history, config))
     history_tokenized = [tokenizer.encode(utterance) for utterance in history]
 
     t0 = time.time()
@@ -182,12 +182,12 @@ def batch_decode(model, tokenizer, history, config):
                                                        num_samples=config['num_samples'], current_output=None)
         time_taken = time.time() - t0
         longest_sample = max([len(sample) for sample in finished_ids + unfinished_ids])
-        print(f'Finished generating. Getting {config["num_samples"]} samples (longest sample {longest_sample} tokens) took {time_taken} seconds')
+        print('Finished generating. Getting {} samples (longest sample {} tokens) took {} seconds'.format(config["num_samples"], longest_sample, time_taken))
     finished_responses = [tokenizer.decode(out, skip_special_tokens=True) for out in finished_ids]
     unfinished_responses = [tokenizer.decode(out, skip_special_tokens=True) for out in unfinished_ids]
     if unfinished_responses:
-        print(f'Got some unfinished samples: {unfinished_responses}')
-    print(f'Responses: {finished_responses}')
+        print('Got some unfinished samples: {}'.format(unfinished_responses))
+    print('Responses: {}'.format(finished_responses))
 
     return finished_responses
 
