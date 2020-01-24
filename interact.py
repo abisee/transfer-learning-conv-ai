@@ -146,7 +146,7 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
     return finished_outputs, unfinished_outputs
 
 def load_model(model, model_checkpoint, device="cuda" if torch.cuda.is_available() else "cpu"):
-    print(f"Getting pretrained model and tokenizer (device={device})...")
+    print("Getting pretrained model and tokenizer (device={device})...".format(device))
     tokenizer_class = GPT2Tokenizer if "gpt2" in model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(model_checkpoint)
     model_class = GPT2LMHeadModel if "gpt2" in model else OpenAIGPTLMHeadModel
