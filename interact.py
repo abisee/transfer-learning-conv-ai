@@ -13,9 +13,9 @@ import time
 import torch
 import torch.nn.functional as F
 
-from pytorch_transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
-from .train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
-from .utils import get_dataset_personalities, download_pretrained_model
+from transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
+from train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
+from utils import get_dataset_personalities, download_pretrained_model
 
 
 # Default is the recommended settings in transfer-learning-conv-ai
@@ -26,9 +26,24 @@ DEFAULT_DECODE_CONFIG = {
     'temperature': 0.7,
     'top_k': 0,
     'top_p': 0.9,
-    'max_history': 2,
+    'max_history_tokens': 800,  # rough max based on 1024 max size for gpt2 (plus leaving space for speaker tokens and generated response)
     'num_samples': 10,
+    'response_prefix': '',
 }
+
+
+def complete_config(config):
+    """
+    Fill in any missing keys in config with the value in DEFAULT_DECODE_CONFIG. If we find any keys in config that
+    aren't in DEFAULT_DECODE_CONFIG, raise an error.
+    """
+    for key, val in config.items():
+        if key not in DEFAULT_DECODE_CONFIG:
+            raise ValueError(f'Unrecognized key in config: {config}. Valid keys are: {list(DEFAULT_DECODE_CONFIG.keys())}')
+    for key, val in DEFAULT_DECODE_CONFIG.items():
+        if key not in config:
+            config[key] = val
+    return config
 
 
 def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
@@ -84,26 +99,57 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
 
 def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_available() else "cpu",
                     no_sample=False, max_length=20, min_length=1, temperature=0.7, top_k=0, top_p=0.9,
-                    num_samples=1, current_output=None):
-    special_tokens_ids = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS)
-    if current_output is None:
-        current_output = []  # now current_output is a list of ints
+                    num_samples=1, current_output=[]):
+    """
+    Inputs:
+        history: The conversation history. List (odd length) of utterances, where the first utterance is the user's.
+            Each utterance is a list of ints (the tokenized utterance).
+        tokenizer: the gpt2 tokenizer
+        model: the gpt2 model
+        device: str. 'cuda' or 'cpu'
+        no_sample: bool. if False, use greedy decoding
+        max_length: int. maximum length (in gpt2 tokens) of the generated output
+        min_length: int. minimum length (in gpt2 tokens) of the generated output
+        temperature: float. softmax temperature
+        top_k: int. k for top k decoding
+        top_p: float. p for top p decoding
+        num_samples: int. The number of samples we want to generate for the response
+        current_output: list of ints. The prefix you want the response to begin with (tokenized).
 
-    # Initialize current_output for each sample
+    Returns:
+        finished_outputs: list (length <= num_samples) of lists (min_length <= length <= max_length) of ints.
+            These are utterances where the model predicted the end token.
+        unfinished_outputs: list (length <= num_samples) of lists (length max_length) of ints.
+            These are utterances where we reached max_length before the model predicted the end token (hence unfinished)
+    """
+
+    special_tokens_ids = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS)
+
+    # Initialize current_outputs, which will accumulate the generated output for each sample
     current_outputs = [[i for i in current_output] for _ in range(num_samples)]
 
     # Record whether each sample is finished or not
     finished = [False for _ in range(num_samples)]
 
+    past = None
+
     for i in range(max_length):
         # print(f'step {i} of max {max_length}')
-        instances = [build_input_from_segments(history, current_output, tokenizer, with_eos=False) for current_output in current_outputs]
 
-        # input_ids and token_type_ids are both tensors shape (num_samples, seqlen)
-        input_ids = torch.tensor([instance["input_ids"] for instance in instances], device=device)
-        token_type_ids = torch.tensor([instance["token_type_ids"] for instance in instances], device=device)
+        # Get input_ids and token_type_ids, both tensors of shape (num_samples, seqlen).
+        if i == 0:
+            # On the first turn seqlen is the history length (plus current_output length).
+            instances = [build_input_from_segments(history, current_output, tokenizer, with_eos=False) for current_output in current_outputs]
+            input_ids = torch.tensor([instance["input_ids"] for instance in instances], device=device)
+            token_type_ids = torch.tensor([instance["token_type_ids"] for instance in instances], device=device)
+        else:
+            # On subsequent turns seqlen=1 because we are using past.
+            input_ids = torch.tensor([[current_output[-1]] for current_output in current_outputs], device=device)
+            speaker2 = tokenizer.convert_tokens_to_ids('<speaker2>')
+            token_type_ids = torch.tensor([[speaker2] for _ in current_outputs], device=device)
 
-        logits = model(input_ids, token_type_ids=token_type_ids)
+        # Get predictions from the model
+        logits, past = model(input_ids, token_type_ids=token_type_ids, past=past)
         if isinstance(logits, tuple):  # for gpt2 and maybe others
             logits = logits[0]
 
@@ -145,6 +191,7 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
 
     return finished_outputs, unfinished_outputs
 
+
 def load_model(model, model_checkpoint, device="cuda" if torch.cuda.is_available() else "cpu"):
     print("Getting pretrained model and tokenizer (device={})...".format(device))
     tokenizer_class = GPT2Tokenizer if "gpt2" in model else OpenAIGPTTokenizer
@@ -154,6 +201,37 @@ def load_model(model, model_checkpoint, device="cuda" if torch.cuda.is_available
     model.to(device)
     add_special_tokens_(model, tokenizer)
     return model, tokenizer
+
+
+def tokenize_truncate_history(history, tokenizer, config):
+    """Tokenize history, then truncate it as necessary to fit under config['max_history_tokens']"""
+    assert len(history) % 2 == 1, f'ERROR: history should have odd number of utterances (with user going first), but this history has ({len(history)}): {history}'
+
+    history_tokenized = [tokenizer.encode(utterance) for utterance in history]  # list of list of ints
+    history_lens = [len(utt) for utt in history_tokenized]
+
+    # Get the longest odd-length history (i.e. starts with user) that fits under max_history_tokens
+    for num_utts in range(len(history), 0, -2):
+        trunc_history_lens = history_lens[-num_utts:]
+
+        # See if the truncated version is short enough
+        if sum(trunc_history_lens) <= config['max_history_tokens']:
+
+            # If we're truncating, log
+            if num_utts != len(history):
+                print('Full history ({} utterances / {} tokens) is longer than max_history_tokens={}. Truncating to last {} utterances ({} tokens)'.format(
+                    len(history), sum(history_lens), config['max_history_tokens'], num_utts, sum(trunc_history_lens)))
+
+            history_tokenized = history_tokenized[-num_utts:]
+            history = history[-num_utts:]
+            break
+
+        # If just the last single utterance is too long, raise error
+        elif num_utts == 1:
+            raise ValueError(f'The last utterance {history[-1]} is too long ({history_lens[-1]} tokens) to fit under the required max_history_tokens={config["max_history_tokens"]}')
+
+    assert len(history) == len(history_tokenized)
+    return history, history_tokenized
 
 
 def batch_decode(model, tokenizer, history, config):
@@ -166,10 +244,19 @@ def batch_decode(model, tokenizer, history, config):
     @param config: dict
     @return: finished_responses: list (length <=config['num_samples']) of strings, each a response to history.
     """
-    # Get history_tokenized, which should be a list of list of ints. each list represents a turn.
-    history = history[-(2 * config['max_history'] + 1):]
-    print('Generating {} responses to this history: {} with this config: {}'.format(config["num_samples"], history, config))
-    history_tokenized = [tokenizer.encode(utterance) for utterance in history]
+
+    # Tokenize and truncate history
+    history_used, history_tokenized = tokenize_truncate_history(history, tokenizer, config)
+
+    # Get current_output (i.e. the start of the response) if applicable
+    if config['response_prefix']:
+        current_output = tokenizer.encode(config['response_prefix'])  # list of ints
+    else:
+        current_output = []
+
+    # Log
+    print('Generating {} responses to this history ({} utterances / {} tokens): {} with this config: {}'.format(
+        config["num_samples"], len(history_used), sum([len(utt) for utt in history_tokenized]), history_used, config))
 
     t0 = time.time()
     with torch.no_grad():
@@ -179,7 +266,7 @@ def batch_decode(model, tokenizer, history, config):
                                                        max_length=config['max_length'], min_length=config['min_length'],
                                                        temperature=config['temperature'],
                                                        top_k=config['top_k'], top_p=config['top_p'],
-                                                       num_samples=config['num_samples'], current_output=None)
+                                                       num_samples=config['num_samples'], current_output=current_output)
         time_taken = time.time() - t0
         longest_sample = max([len(sample) for sample in finished_ids + unfinished_ids])
         print('Finished generating. Getting {} samples (longest sample {} tokens) took {} seconds'.format(config["num_samples"], longest_sample, time_taken))
@@ -189,56 +276,82 @@ def batch_decode(model, tokenizer, history, config):
         print('Got some unfinished samples: {}'.format(unfinished_responses))
     print('Responses: {}'.format(finished_responses))
 
-    return finished_responses
+    return finished_responses, unfinished_responses, history_used
 
 
-def run():
-    parser = ArgumentParser()
-    parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
-    parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
-    parser.add_argument("--model", type=str, default="gpt", help="Model type (gpt or gpt2)")
-    parser.add_argument("--model_checkpoint", type=str, default="", help="Path, url or short name of the model")
-    parser.add_argument("--max_history", type=int, default=2, help="Number of previous utterances to keep in history")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
+# def run():
+#     parser = ArgumentParser()
+#     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
+#     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
+#     parser.add_argument("--model", type=str, default="gpt", help="Model type (gpt or gpt2)")
+#     parser.add_argument("--model_checkpoint", type=str, default="", help="Path, url or short name of the model")
+#     parser.add_argument("--max_history", type=int, default=2, help="Number of previous utterances to keep in history")
+#     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
+#
+#     parser.add_argument("--no_sample", action='store_true', help="Set to use greedy decoding instead of sampling")
+#     parser.add_argument("--max_length", type=int, default=20, help="Maximum length of the output utterances")
+#     parser.add_argument("--min_length", type=int, default=1, help="Minimum length of the output utterances")
+#     parser.add_argument("--seed", type=int, default=42, help="Seed")
+#     parser.add_argument("--temperature", type=int, default=0.7, help="Sampling softmax temperature")
+#     parser.add_argument("--top_k", type=int, default=0, help="Filter top-k tokens before sampling (<=0: no filtering)")
+#     parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus filtering (top-p) before sampling (<=0.0: no filtering)")
+#     args = parser.parse_args()
+#
+#     logging.basicConfig(level=logging.INFO)
+#     logger = logging.getLogger(__file__)
+#     logger.info(pformat(args))
+#
+#     if args.model_checkpoint == "":
+#         args.model_checkpoint = download_pretrained_model()
+#
+#     random.seed(args.seed)
+#     torch.random.manual_seed(args.seed)
+#     torch.cuda.manual_seed(args.seed)
+#
+#     model, tokenizer = load_model(args.model, args.model_checkpoint, args.device)
+#
+#     print('top_k: {}, top_p: {}, temperature: {}'.format(args.top_k, args.top_p, args.temperature))
+#
+#     history = []
+#     while True:
+#         raw_text = input(">>> ")
+#         while not raw_text:
+#             print('Prompt should not be empty!')
+#             raw_text = input(">>> ")
+#         history.append(tokenizer.encode(raw_text))
+#         with torch.no_grad():
+#             out_ids, _ = sample_sequence(history, tokenizer, model, args.min_length, args.max_length, args.device, args.temperature, args.top_p, args.top_k, args.no_sample)
+#         history.append(out_ids)
+#         history = history[-(2*args.max_history+1):]
+#         out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
+#         print(out_text)
 
-    parser.add_argument("--no_sample", action='store_true', help="Set to use greedy decoding instead of sampling")
-    parser.add_argument("--max_length", type=int, default=20, help="Maximum length of the output utterances")
-    parser.add_argument("--min_length", type=int, default=1, help="Minimum length of the output utterances")
-    parser.add_argument("--seed", type=int, default=42, help="Seed")
-    parser.add_argument("--temperature", type=int, default=0.7, help="Sampling softmax temperature")
-    parser.add_argument("--top_k", type=int, default=0, help="Filter top-k tokens before sampling (<=0: no filtering)")
-    parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus filtering (top-p) before sampling (<=0.0: no filtering)")
-    args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__file__)
-    logger.info(pformat(args))
 
-    if args.model_checkpoint == "":
-        args.model_checkpoint = download_pretrained_model()
+def run_remote_module():
+    """for interactive testing on the cluster"""
 
-    random.seed(args.seed)
-    torch.random.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    seed = 1
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
-    model, tokenizer = load_model(args.model, args.model_checkpoint, args.device)
+    # Load model
+    MODEL = 'gpt2-medium'
+    MODEL_CHECKPOINT = 'runs/Jan04_22-40-10_ip-172-31-71-210_gpt2-medium'
+    model, tokenizer = load_model(MODEL, MODEL_CHECKPOINT)
 
-    print('top_k: {}, top_p: {}, temperature: {}'.format(args.top_k, args.top_p, args.temperature))
+    msg = {
+        'history': ['i am having such a bad day today!', 'oh no! why is that?', 'i fell down a well'],
+        'config': {}
+    }
 
-    history = []
-    while True:
-        raw_text = input(">>> ")
-        while not raw_text:
-            print('Prompt should not be empty!')
-            raw_text = input(">>> ")
-        history.append(tokenizer.encode(raw_text))
-        with torch.no_grad():
-            out_ids, _ = sample_sequence(history, tokenizer, model, args.min_length, args.max_length, args.device, args.temperature, args.top_p, args.top_k, args.no_sample)
-        history.append(out_ids)
-        history = history[-(2*args.max_history+1):]
-        out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
-        print(out_text)
+    history = msg['history']
+    config = msg['config'] if 'config' in msg else {}  # dict
+    config = complete_config(config)
+    responses, unfinished_responses, history_used = batch_decode(model, tokenizer, history, config)
 
 
 if __name__ == "__main__":
-    run()
+    # run()
+    run_remote_module()
