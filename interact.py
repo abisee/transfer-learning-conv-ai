@@ -19,6 +19,8 @@ from utils import get_dataset_personalities, download_pretrained_model
 
 
 # Default is the recommended settings in transfer-learning-conv-ai
+# max_history_tokens=800 is a rough max based on gpt2's max size of 1024 (plus leaving space for speaker tokens and generated response)
+# See here: https://github.com/huggingface/transformers/issues/1749
 DEFAULT_DECODE_CONFIG = {
     'no_sample': False,
     'min_length': 1,
@@ -26,7 +28,7 @@ DEFAULT_DECODE_CONFIG = {
     'temperature': 0.7,
     'top_k': 0,
     'top_p': 0.9,
-    'max_history_tokens': 800,  # rough max based on 1024 max size for gpt2 (plus leaving space for speaker tokens and generated response)
+    'max_history_tokens': 800,
     'num_samples': 10,
     'response_prefix': '',
 }
