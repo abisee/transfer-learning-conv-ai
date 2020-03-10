@@ -41,7 +41,7 @@ def complete_config(config):
     """
     for key, val in config.items():
         if key not in DEFAULT_DECODE_CONFIG:
-            raise ValueError(f'Unrecognized key in config: {config}. Valid keys are: {list(DEFAULT_DECODE_CONFIG.keys())}')
+            raise ValueError(f'Unrecognized key "{key}" in config: {config}. Valid keys are: {list(DEFAULT_DECODE_CONFIG.keys())}')
     for key, val in DEFAULT_DECODE_CONFIG.items():
         if key not in config:
             config[key] = val
