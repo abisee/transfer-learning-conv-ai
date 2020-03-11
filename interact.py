@@ -18,10 +18,6 @@ from train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
 from utils import get_dataset_personalities, download_pretrained_model
 
 
-import transformers
-print('transformers version: ', transformers.__version__)
-
-
 # Default is the recommended settings in transfer-learning-conv-ai
 # max_history_tokens=800 is a rough max based on gpt2's max size of 1024 (plus leaving space for speaker tokens and generated response)
 # See here: https://github.com/huggingface/transformers/issues/1749
