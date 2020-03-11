@@ -41,7 +41,7 @@ def complete_config(config):
     """
     for key, val in config.items():
         if key not in DEFAULT_DECODE_CONFIG:
-            raise ValueError(f'Unrecognized key "{key}" in config: {config}. Valid keys are: {list(DEFAULT_DECODE_CONFIG.keys())}')
+            raise ValueError(f'Invalid key "{key}" in config: {config}. Valid keys are: {list(DEFAULT_DECODE_CONFIG.keys())}')
     for key, val in DEFAULT_DECODE_CONFIG.items():
         if key not in config:
             config[key] = val
@@ -207,7 +207,7 @@ def load_model(model, model_checkpoint, device="cuda" if torch.cuda.is_available
 
 def tokenize_truncate_history(history, tokenizer, config):
     """Tokenize history, then truncate it as necessary to fit under config['max_history_tokens']"""
-    assert len(history) % 2 == 1, f'ERROR: history should have odd number of utterances (with user going first), but this history has ({len(history)}): {history}'
+    assert len(history) % 2 == 1, f'ERROR: history should have odd number of utterances (with user going first), but this history has {len(history)}: {history}'
 
     history_tokenized = [tokenizer.encode(utterance) for utterance in history]  # list of list of ints
     history_lens = [len(utt) for utt in history_tokenized]
@@ -221,7 +221,7 @@ def tokenize_truncate_history(history, tokenizer, config):
 
             # If we're truncating, log
             if num_utts != len(history):
-                print('Full history ({} utterances / {} tokens) is longer than max_history_tokens={}. Truncating to last {} utterances ({} tokens)'.format(
+                print('The full history ({} utterances / {} tokens) is longer than max_history_tokens={}. Truncating to last {} utterances ({} tokens)'.format(
                     len(history), sum(history_lens), config['max_history_tokens'], num_utts, sum(trunc_history_lens)))
 
             history_tokenized = history_tokenized[-num_utts:]
@@ -230,7 +230,7 @@ def tokenize_truncate_history(history, tokenizer, config):
 
         # If just the last single utterance is too long, raise error
         elif num_utts == 1:
-            raise ValueError(f'The last utterance {history[-1]} is too long ({history_lens[-1]} tokens) to fit under the required max_history_tokens={config["max_history_tokens"]}')
+            raise ValueError(f'The last utterance in the history: "{history[-1]}" is too long ({history_lens[-1]} tokens) to fit under the required max_history_tokens={config["max_history_tokens"]}')
 
     assert len(history) == len(history_tokenized)
     return history, history_tokenized
@@ -348,12 +348,19 @@ def run_remote_module():
         'config': {}
     }
 
-    history = msg['history']
-    config = msg['config'] if 'config' in msg else {}  # dict
-    config = complete_config(config)
-    responses, unfinished_responses, history_used = batch_decode(model, tokenizer, history, config)
+    try:
+        history = msg['history']
+        config = msg['config'] if 'config' in msg else {}  # dict
+        config = complete_config(config)
+        responses, unfinished_responses, history_used = batch_decode(model, tokenizer, history, config)
+        output = {'responses': responses, 'unfinished_responses': unfinished_responses, 'history_used': history_used}
+    except Exception as e:
+        print('Encountered error, which we will send back in output: ', str(e))
+        output = {'error': True, 'message': str(e)}
+    return output
 
 
 if __name__ == "__main__":
     # run()
-    run_remote_module()
+    output = run_remote_module()
+    print('Received this output: ', output)
