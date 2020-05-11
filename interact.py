@@ -166,7 +166,7 @@ def sample_sequence(history, tokenizer, model, device="cuda" if torch.cuda.is_av
             if i < min_length and p.item() in special_tokens_ids:
                 while p.item() in special_tokens_ids:
                     if probs[idx].max().item() == 1:
-                        warnings.warn("Warning: model generating special token with probability 1.")
+                        print("Warning: model generating special token with probability 1.")
                         break  # avoid infinitely looping over special token
                     prev[idx] = torch.multinomial(probs[idx], num_samples=1)
 
